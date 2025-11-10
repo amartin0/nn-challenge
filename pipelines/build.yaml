@@ -1,0 +1,316 @@
+trigger: none # the pipeline has to be executed manually
+
+variables:
+  - name: JAVA_VERSION
+    value: '17'
+  - name: ACR_SERVICE_CONNECTION
+    value: 'challenge1'
+  - name: IMAGE_NAME
+    value: 'springboot-app'
+  - name: DOCKERFILE_PATH
+    value: './javacode/Dockerfile'
+  - name: ACR_NAME
+    value: 'challenge1'
+  - group: CosignSecrets
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+# ==========================================
+# REPOSITORIO EXTERNO: Java Code
+# ==========================================
+resources:
+  repositories:
+    - repository: javacode         
+      type: git
+      name: challenge/javacode
+      ref: dev          # Dev brach is used
+    - repository: helmcharts       
+      type: git
+      name: challenge/helm-charts  
+      ref: main                    
+
+stages:
+  # ========================================================
+  # STAGE 1: DEV - Build and Deploy 
+  # ========================================================
+  - stage: Dev
+    displayName: "DEV - Build & Deploy"
+    jobs:
+      - deployment: BuildAndDeployDev
+        displayName: "Build & Deploy DEV"
+        environment: "dev"
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: javacode
+                  displayName: "Checkout Java code (dev)"
+                  persistCredentials: true
+                  
+                - task: JavaToolInstaller@0
+                  inputs:
+                    versionSpec: "$(JAVA_VERSION)"
+                    jdkArchitectureOption: 'x64'
+                    jdkSourceOption: 'PreInstalled'
+                  displayName: "Set up Java $(JAVA_VERSION)"
+
+                - script: |
+                    cd ./javacode
+                    find . -name mvnw
+                    chmod +x ./mvnw
+                    ./mvnw clean package -DskipTests
+                  displayName: "Build Spring Boot JAR"
+
+                - script: |
+                    cd ./javacode
+                    PROJECT_VERSION=$(./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout)
+                    echo "##vso[task.setvariable variable=PROJECT_VERSION;isOutput=true]$PROJECT_VERSION"
+                  name: setVersion
+                  displayName: "Get project version"
+                
+                - task: Docker@2
+                  displayName: "Login to ACR"
+                  inputs:
+                    command: login
+                    containerRegistry: "$(ACR_SERVICE_CONNECTION)"
+
+                - task: Docker@2
+                  displayName: "Build & Push Docker Image DEV"
+                  inputs:
+                    containerRegistry: "$(ACR_SERVICE_CONNECTION)"
+                    repository: "$(IMAGE_NAME)/dev"
+                    command: "buildAndPush"
+                    Dockerfile: "$(DOCKERFILE_PATH)"
+                    tags: |
+                      $(setVersion.PROJECT_VERSION)
+
+                - script: |
+                    set -e
+                    echo "Installing Trivy..."
+                    sudo apt-get update -y
+                    sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+                    wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+                    echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee /etc/apt/sources.list.d/trivy.list
+                    sudo apt-get update -y
+                    sudo apt-get install -y trivy
+                    trivy --version
+                  displayName: "Install Trivy"
+
+                - script: |
+                    echo "🔍 Scanning source code for vulnerabilities..."
+                    cd javacode
+                    trivy fs --exit-code 1 --severity CRITICAL .
+                  displayName: "Trivy scan source code (Java)"
+
+                - script: |
+                    echo "🔍 Scanning Docker image for vulnerabilities..."
+                    trivy image --exit-code 1 --severity CRITICAL "$(ACR_NAME).azurecr.io/$(IMAGE_NAME)/dev:$(setVersion.PROJECT_VERSION)" || echo "⚠️ Vulnerabilities found, review report"
+                  displayName: "Trivy scan Docker image"                      
+
+                - script: |
+                    IMAGE_FULL="$(ACR_NAME).azurecr.io/$(IMAGE_NAME)/dev:$(setVersion.PROJECT_VERSION)"
+                    IMAGE_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' $IMAGE_FULL)
+                    echo "##vso[task.setvariable variable=IMAGE_DIGEST;isOutput=true]$IMAGE_DIGEST"
+                  name: setDigest
+                  displayName: "Get image digest"
+
+                - script: |
+                    set -e
+                    COSIGN_VERSION="v3.0.2"
+                    curl -LO https://github.com/sigstore/cosign/releases/download/$COSIGN_VERSION/cosign-linux-amd64
+                    chmod +x cosign-linux-amd64
+                    sudo mv cosign-linux-amd64 /usr/local/bin/cosign
+
+                    echo "$COSIGN_PRIVATE_KEY" | base64 --decode > cosign.key
+                    chmod 600 cosign.key
+                    export COSIGN_PASSWORD="$COSIGN_KEY_PASSWORD"
+
+                    cosign sign --key cosign.key $(setDigest.IMAGE_DIGEST)
+                  displayName: "Sign Docker Image DEV"
+
+                - task: DownloadSecureFile@1
+                  name: downloadKubeconfig
+                  inputs:
+                    secureFile: 'kubeconfig-dev.yaml'  
+                  
+                - checkout: helmcharts
+                  displayName: "Checkout Helm Charts repo"
+
+                - script: |
+                    echo "Kubeconfig path: $(downloadKubeconfig.secureFilePath)"
+                    cat $(downloadKubeconfig.secureFilePath)
+                    cd helm-charts
+                    export KUBECONFIG=$(downloadKubeconfig.secureFilePath)
+                    echo $KUBECONFIG
+                    kubectl get pods -n dev
+                    echo "valor VERSION:  $(setVersion.PROJECT_VERSION)"
+                    echo "valor DIGEST: $(setDigest.IMAGE_DIGEST)"
+                    DIGEST="$(echo '$(setDigest.IMAGE_DIGEST)' | awk -F @ '{print $2}')"
+                    echo $DIGEST
+                    sed -i 's/^appVersion:.*/appVersion: "'$(setVersion.PROJECT_VERSION)'"/' springboot-app/Chart.yaml
+                    helm upgrade --install springboot-dev ./springboot-app -f ./values.yaml -n dev --set deployment.image.tag=$(setVersion.PROJECT_VERSION) --set deployment.image.digest=$DIGEST --set deployment.image.repository="$ACR_NAME".azurecr.io/springboot-app/dev
+                  displayName: install helm
+
+
+  # ========================================================
+  # STAGE 2: STAGING - Promote with Manual Approval
+  # ========================================================
+  - stage: Staging
+    displayName: "STAGING - Promote"
+    dependsOn: Dev
+    variables:
+      IMAGE_DIGEST: $[ stageDependencies.Dev.BuildAndDeployDev.outputs['BuildAndDeployDev.setDigest.IMAGE_DIGEST'] ]
+      PROJECT_VERSION: $[ stageDependencies.Dev.BuildAndDeployDev.outputs['BuildAndDeployDev.setVersion.PROJECT_VERSION'] ]
+    jobs:
+      - deployment: DeployStaging
+        displayName: "Promote to STAGING"
+        environment: "staging"
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: Docker@2
+                  displayName: "Login to ACR"
+                  inputs:
+                    command: login
+                    containerRegistry: "$(ACR_SERVICE_CONNECTION)"
+
+                - script: |
+                    set -e
+                    COSIGN_VERSION="v3.0.2"
+                    curl -LO https://github.com/sigstore/cosign/releases/download/$COSIGN_VERSION/cosign-linux-amd64
+                    chmod +x cosign-linux-amd64
+                    sudo mv cosign-linux-amd64 /usr/local/bin/cosign
+
+                    echo "$COSIGN_PUBLIC_KEY" | base64 --decode > cosign.pub
+                    chmod 644 cosign.pub
+    
+                    echo "valores"
+                    echo "IMAGE_DIGEST: $(IMAGE_DIGEST)"
+                    echo "##vso[task.setvariable variable=IMAGE_DIGEST;isOutput=true]$IMAGE_DIGEST"
+                    echo "PROJECT_VERSION: $(PROJECT_VERSION)"
+                    echo "##vso[task.setvariable variable=PROJECT_VERSION;isOutput=true]$PROJECT_VERSION"
+                  name: setVars
+                  displayName: "Install Cosign"
+
+                - script: |
+                    set -e
+                    echo "🔍 Verifying Cosign signature..."
+                    cosign verify --key cosign.pub $(IMAGE_DIGEST)
+                  displayName: "Verify Cosign Signature"
+
+                - script: |
+                    set -e
+                    docker pull $(IMAGE_DIGEST)
+                    docker tag $(IMAGE_DIGEST) $(ACR_SERVICE_CONNECTION).azurecr.io/$(IMAGE_NAME)/staging:$(PROJECT_VERSION)
+                    docker push $(ACR_SERVICE_CONNECTION).azurecr.io/$(IMAGE_NAME)/staging:$(PROJECT_VERSION)
+                  displayName: "Promote Image to Staging"
+
+                - task: DownloadSecureFile@1
+                  name: downloadKubeconfig
+                  inputs:
+                    secureFile: 'kubeconfig-staging.yaml'  
+                  
+                - checkout: helmcharts
+                  displayName: "Checkout Helm Charts repo"
+
+                - script: |
+                    echo "Kubeconfig path: $(downloadKubeconfig.secureFilePath)"
+                    cat $(downloadKubeconfig.secureFilePath)
+                    export KUBECONFIG=$(downloadKubeconfig.secureFilePath)
+                    echo $KUBECONFIG
+                    kubectl get pods -n staging
+                    echo "valor VERSION:  $PROJECT_VERSION"
+                    echo "valor DIGEST: $IMAGE_DIGEST"
+                    DIGEST="$(echo $IMAGE_DIGEST | awk -F @ '{print $2}')"
+                    echo $DIGEST
+                    sed -i 's/^appVersion:.*/appVersion: "'$PROJECT_VERSION'"/' springboot-app/Chart.yaml
+                    helm upgrade --install springboot-staging ./springboot-app -f ./values.yaml -n staging --set deployment.image.tag=$PROJECT_VERSION --set deployment.image.digest=$DIGEST --set deployment.image.repository="$ACR_NAME".azurecr.io/springboot-app/staging                  
+                  displayName: install helm
+
+  # ========================================================
+  # STAGE 3: PROD - Promote with Manual Approval
+  # ========================================================
+  - stage: Prod
+    displayName: "PROD - Promote"
+    dependsOn: Staging
+    variables:
+      IMAGE_DIGEST: $[ stageDependencies.Staging.DeployStaging.outputs['DeployStaging.setVars.IMAGE_DIGEST'] ]
+      PROJECT_VERSION: $[ stageDependencies.Staging.DeployStaging.outputs['DeployStaging.setVars.PROJECT_VERSION'] ]
+    jobs:
+      - deployment: DeployProd
+        displayName: "Promote to PROD"
+        environment: "prod"
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: Docker@2
+                  displayName: "Login to ACR"
+                  inputs:
+                    command: login
+                    containerRegistry: "$(ACR_SERVICE_CONNECTION)"
+
+                - script: |
+                    set -e
+                    COSIGN_VERSION="v3.0.2"
+                    curl -LO https://github.com/sigstore/cosign/releases/download/$COSIGN_VERSION/cosign-linux-amd64
+                    chmod +x cosign-linux-amd64
+                    sudo mv cosign-linux-amd64 /usr/local/bin/cosign
+
+                    echo "$COSIGN_PUBLIC_KEY" | base64 --decode > cosign.pub
+                    chmod 644 cosign.pub
+
+                    echo "valores"
+                    echo "IMAGE_DIGEST: $(IMAGE_DIGEST)"
+                    echo "PROJECT_VERSION: $(PROJECT_VERSION)"
+                  displayName: "Install Cosign"
+
+                - script: |
+                    set -e
+                    echo "🔍 Verifying Cosign signature..."
+                    cosign verify --key cosign.pub $(IMAGE_DIGEST)
+                  displayName: "Verify Cosign Signature"
+
+                - script: |
+                    set -e
+                    docker pull $(IMAGE_DIGEST)
+                    docker tag $(IMAGE_DIGEST) $(ACR_SERVICE_CONNECTION).azurecr.io/$(IMAGE_NAME)/prod:$(PROJECT_VERSION)
+                    docker push $(ACR_SERVICE_CONNECTION).azurecr.io/$(IMAGE_NAME)/prod:$(PROJECT_VERSION)
+                  displayName: "Promote Image to Prod"
+
+
+                - task: DownloadSecureFile@1
+                  name: downloadKubeconfig
+                  inputs:
+                    secureFile: 'kubeconfig-prod.yaml'  
+                  
+                - checkout: helmcharts
+                  displayName: "Checkout Helm Charts repo"
+
+                - script: |
+                    echo "Kubeconfig path: $(downloadKubeconfig.secureFilePath)"
+                    cat $(downloadKubeconfig.secureFilePath)
+                    export KUBECONFIG=$(downloadKubeconfig.secureFilePath)
+                    echo $KUBECONFIG
+                    kubectl get pods -n prod
+                    echo "valor VERSION:  $PROJECT_VERSION"
+                    echo "valor DIGEST: $IMAGE_DIGEST"
+                    DIGEST="$(echo $IMAGE_DIGEST | awk -F @ '{print $2}')"
+                    echo $DIGEST
+                    sed -i 's/^appVersion:.*/appVersion: "'$PROJECT_VERSION'"/' springboot-app/Chart.yaml
+                    helm upgrade --install springboot-prod ./springboot-app -f ./values.yaml -n prod --set deployment.image.tag=$PROJECT_VERSION --set deployment.image.digest=$DIGEST --set deployment.image.repository="$ACR_NAME".azurecr.io/springboot-app/prod
+                  displayName: install helm
+
+
+
+
+
+

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: springboot-app
+description: Helm chart to deploy an aplicación Spring Boot over Kubernetes
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
