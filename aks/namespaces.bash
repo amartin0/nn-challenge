@@ -1,18 +1,18 @@
 #!/bin/bash
 set -e
 
-# Nombres de namespaces
+# Namespace names
 NAMESPACES=("dev" "staging" "prod")
 SA_NAME="deployer"
 
 for ns in "${NAMESPACES[@]}"; do
-  echo "🔹 Creando namespace: $ns"
+  echo "Creando namespace: $ns"
   kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f -
 
-  echo "🔹 Creando ServiceAccount '$SA_NAME' en namespace $ns"
+  echo "Creating ServiceAccount '$SA_NAME' in namespace $ns"
   kubectl create serviceaccount "$SA_NAME" -n "$ns" --dry-run=client -o yaml | kubectl apply -f -
 
-  echo "🔹 Creando Role y RoleBinding para desplegar Deployments y Services..."
+  echo "Creating Role and RoleBinding to deploy Deployments and Services..."
   cat <<EOF | kubectl apply -f -
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -41,8 +41,8 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 EOF
 
-  echo "✅ Namespace $ns listo con ServiceAccount y permisos."
+  echo "Namespace $ns ready with ServiceAccount and permissions."
 done
 
-echo "🎉 Todos los namespaces, serviceaccounts y roles creados correctamente."
+echo "All namespaces, service accounts, and roles created successfully."
 
