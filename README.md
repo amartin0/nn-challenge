@@ -6,8 +6,10 @@ It is divided into **five folders**, each containing one of the components I cre
 Inside each folder, there is a README file explaining the purpose of its files.
 
 I used **Azure components** (Kubernetes AKS and Container Registry ACR) instead of Amazon services because I do not have an AWS account.  
-For the Kubernetes cluster deployment, the process would be essentially the same since both use a `ServiceAccount` and a config file.  
+For the Kubernetes cluster deployment, the process would be essentially the same since both use a `ServiceAccount` and a config file.
+
 However, for the registry, the pipeline would need to be adapted because I am using an Azure Pipeline task specifically for ACR.  
+
 In the case of Amazon ECR, the connection to the registry would need to be scripted manually.
 
 ---
