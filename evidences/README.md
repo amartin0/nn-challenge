@@ -22,4 +22,4 @@ These images illustrate the complete **CI/CD workflow**, including:
 - Manual approvals for staging and production environments  
 - Verification of successful version upgrade
 
-> ⚠️ Note: The image numbers correspond to the files in this folder.
+> Note: The image numbers correspond to the files in this folder.
