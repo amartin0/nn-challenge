@@ -5,12 +5,13 @@ It is a simple **Hello World** application that displays the **version** and **d
 
 ---
 
-## 📦 Versioning
+## Versioning
 
 - The version specified in the `pom.xml` file is used by the pipeline to **compile** and **build a new Docker image** with the updated application version.
 
 ---
 
-## ⚙️ Pipeline Integration
+## Pipeline Integration
 
 - The pipeline uses the **`dev` branch** of this code to build and deploy the application.
+
