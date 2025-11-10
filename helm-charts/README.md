@@ -14,6 +14,8 @@ This Helm Chart is used to deploy the application to a Kubernetes cluster.
 - The chart deploys:  
   - A **Service** to expose the application  
   - A **Deployment** with a single replica by default (this is for testing purposes to minimize cluster resource usage)
+  - The pod will be tagged with the digest for security and with the version to simplify management for administrators and developers.
 
 Note: The replica count can be adjusted in values.yaml if needed for production.
+
 
