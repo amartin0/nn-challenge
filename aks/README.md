@@ -30,6 +30,6 @@ kubectl apply -f secrettoken.yaml
 
 ## Result
 
-All required namespaces and ServiceAccounts will be created.
-Each environment will have the necessary permissions for deploying images.
-Kubernetes config files will be generated and ready for use in CI/CD pipelines.
+- All required namespaces and ServiceAccounts will be created.
+- Each environment will have the necessary permissions for deploying images.
+- Kubernetes config files will be generated and ready for use in CI/CD pipelines.
